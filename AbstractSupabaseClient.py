@@ -188,6 +188,7 @@ class AbstractSupabaseClient:
 
                 column_name = column_definition["column_name"]
                 type_name = column_definition["data_type"]
+                is_primary_key = column_definition["is_primary_key"]
                 is_nullable = column_definition["is_nullable"]
                 is_identity = column_definition["is_identity"]
                 has_default_value = column_definition["has_default_value"]
@@ -212,7 +213,7 @@ class AbstractSupabaseClient:
                     raise ValueError(f"Unknown type: {type_name}")
 
                 # Set the type to None if needed
-                if is_nullable or has_default_value or is_identity:
+                if not is_primary_key and (is_nullable or has_default_value or is_identity):
                     type_definition = type_definition[:-1] + f" | None\n"
 
             type_definitions[table_name] = type_definition
