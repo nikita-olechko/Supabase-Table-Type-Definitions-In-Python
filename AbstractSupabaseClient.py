@@ -136,8 +136,20 @@ class AbstractSupabaseClient:
             result jsonb := '[]'::jsonb;  -- Initialize an empty JSON array
         BEGIN
             SELECT jsonb_agg(jsonb_build_object(
-                'column_name', c.column_name,
+                'column_name', c.column_name, 
                 'data_type', c.data_type,
+                'is_primary_key', EXISTS (
+                SELECT
+                  1
+                FROM
+                  information_schema.table_constraints tc
+                  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                WHERE
+                  tc.table_schema = 'public'
+                  AND tc.table_name = c.table_name
+                  AND kcu.column_name = c.column_name
+                  AND tc.constraint_type = 'PRIMARY KEY'
+              ),
                 'is_nullable', c.is_nullable = 'YES',
                 'is_identity', c.is_identity = 'YES',
                 'has_default_value', c.column_default IS NOT NULL
@@ -146,16 +158,16 @@ class AbstractSupabaseClient:
             FROM information_schema.columns c
             WHERE c.table_schema = 'public'
             AND c.table_name = selected_table_name;  -- Use the input parameter
-
+        
             RETURN result;
         END;
         $$ LANGUAGE plpgsql;
-
+        
         -- Test the function:
         SELECT
           *
         FROM
-          public.get_table_data_structure ('api_keys');
+          public.get_table_data_structure ('backtests');
         """
         return self.supabase_service_client.rpc("get_table_data_structure",
                                                 {"selected_table_name": table_name}).execute().data
