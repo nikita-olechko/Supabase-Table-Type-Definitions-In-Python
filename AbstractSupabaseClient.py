@@ -2,6 +2,7 @@ import abc
 import os
 import types
 
+from classes.supabase import supabase_types_to_python_types
 from classes.utilities.Utilities import Utilities
 
 
@@ -39,7 +40,8 @@ class AbstractSupabaseClient:
         Inserts a row into the table. Validates the row data against the table structure.
         """
         self._validate_insertion_row_data(table_name, row_data)
-        return self.supabase_service_client.table(table_name).insert(row_data).execute()
+        json_serialized_row_data = Utilities.custom_json_serializer(row_data)
+        return self.supabase_service_client.table(table_name).insert(json_serialized_row_data).execute()
 
     def _validate_insertion_row_data(self, table_name: str, row_data: dict):
         """
@@ -93,6 +95,15 @@ class AbstractSupabaseClient:
                 if not Utilities.has_type(union_type, type(row_data[column_name])):
                     raise ValueError(f"Column '{column_name}' is not of type {union_type}.")
 
+            # Check against array types
+            elif type(table_data_structure.__annotations__[column_name]) == type(list):
+                list_type = table_data_structure.__annotations__[column_name]
+                if not isinstance(row_data[column_name], list):
+                    raise ValueError(f"Column '{column_name}' is not of type list.")
+                for item in row_data[column_name]:
+                    if not isinstance(item, list_type.__args__[0]):
+                        raise ValueError(f"Column '{column_name}' is not of type {list_type}.")
+
             # Check against single types
             elif not isinstance(row_data[column_name], table_data_structure.__annotations__[column_name]):
                 raise ValueError(
@@ -136,33 +147,39 @@ class AbstractSupabaseClient:
             result jsonb := '[]'::jsonb;  -- Initialize an empty JSON array
         BEGIN
             SELECT jsonb_agg(jsonb_build_object(
-                'column_name', c.column_name, 
+                'column_name', c.column_name,
                 'data_type', c.data_type,
                 'is_primary_key', EXISTS (
-                SELECT
-                  1
-                FROM
-                  information_schema.table_constraints tc
-                  JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-                WHERE
-                  tc.table_schema = 'public'
-                  AND tc.table_name = c.table_name
-                  AND kcu.column_name = c.column_name
-                  AND tc.constraint_type = 'PRIMARY KEY'
-              ),
+                    SELECT
+                      1
+                    FROM
+                      information_schema.table_constraints tc
+                      JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                    WHERE
+                      tc.table_schema = 'public'
+                      AND tc.table_name = c.table_name
+                      AND kcu.column_name = c.column_name
+                      AND tc.constraint_type = 'PRIMARY KEY'
+                ),
                 'is_nullable', c.is_nullable = 'YES',
                 'is_identity', c.is_identity = 'YES',
-                'has_default_value', c.column_default IS NOT NULL
+                'has_default_value', c.column_default IS NOT NULL,
+                'array_subtype', CASE
+                    WHEN c.data_type = 'ARRAY' THEN
+                        c.udt_name -- Extract the subtype
+                    ELSE
+                        NULL
+                END
             ))
             INTO result
             FROM information_schema.columns c
             WHERE c.table_schema = 'public'
             AND c.table_name = selected_table_name;  -- Use the input parameter
-        
+
             RETURN result;
         END;
         $$ LANGUAGE plpgsql;
-        
+
         -- Test the function:
         SELECT
           *
@@ -180,6 +197,7 @@ class AbstractSupabaseClient:
         """
         tables = self.get_all_tables_from_supabase()
         tables_list = [table["table_name"] for table in tables]
+        import_list_type = False
         type_definitions = {}
 
         # Make an initial class that links the table name to the column type identifiers
@@ -205,24 +223,18 @@ class AbstractSupabaseClient:
                 is_identity = column_definition["is_identity"]
                 has_default_value = column_definition["has_default_value"]
 
-                if type_name == "integer":
-                    type_definition += f"    {column_name}: int\n"
-                elif type_name == "text":
-                    type_definition += f"    {column_name}: str\n"
-                elif type_name == "timestamp with time zone":
-                    type_definition += f"    {column_name}: str\n"
-                elif type_name == "numeric":
-                    type_definition += f"    {column_name}: float\n"
-                elif type_name == "boolean":
-                    type_definition += f"    {column_name}: bool\n"
-                elif type_name == "jsonb":
-                    type_definition += f"    {column_name}: dict\n"
-                elif type_name == "bigint":
-                    type_definition += f"    {column_name}: int\n"
-                elif type_name == "uuid":
-                    type_definition += f"    {column_name}: str\n"
+                try:
+                    stringified_python_type = supabase_types_to_python_types[type_name]
+                except KeyError:
+                    raise KeyError(f"Type {type_name} not found in supabase_types_to_python_types.")
+
+                if type_name != "ARRAY":
+                    type_definition += f"    {column_name}: {stringified_python_type}\n"
                 else:
-                    raise ValueError(f"Unknown type: {type_name}")
+                    array_subtype = column_definition["array_subtype"].replace("_", "").replace(" ", "")
+                    import_list_type = True
+                    stringified_python_type = supabase_types_to_python_types[array_subtype]
+                    type_definition += f"    {column_name}: List[{stringified_python_type}]\n"
 
                 # Set the type to None if needed
                 if not is_primary_key and (is_nullable or has_default_value or is_identity):
@@ -239,6 +251,8 @@ class AbstractSupabaseClient:
         full_file_path = os.path.join(root_path, self.datatypes_file_path_from_root)
 
         with open(full_file_path, "w") as f:
+            if import_list_type:
+                f.write("from typing import List\n\n\n")
 
             for table_name, type_definition in type_definitions.items():
                 f.write(f"{type_definition}\n\n")
