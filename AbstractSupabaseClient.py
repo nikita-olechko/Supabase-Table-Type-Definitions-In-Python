@@ -43,7 +43,8 @@ class AbstractSupabaseClient:
         """
         return self.supabase_service_client.rpc("get_all_tables").execute().data
 
-    def get_table_data_structure(self, table_name: str):
+
+    def get_table_data_structure_from_supabase(self, table_name: str):
         """
         Calls the rpc method 'get_table_data_structure'.
 
@@ -58,7 +59,9 @@ class AbstractSupabaseClient:
             SELECT jsonb_agg(jsonb_build_object(
                 'column_name', c.column_name,
                 'data_type', c.data_type,
-                'is_nullable', c.is_nullable  -- Include the nullable information
+                'is_nullable', c.is_nullable = 'YES',
+                'is_identity', c.is_identity = 'YES',
+                'has_default_value', c.column_default IS NOT NULL
             ))
             INTO result
             FROM information_schema.columns c
@@ -84,12 +87,15 @@ class AbstractSupabaseClient:
 
         This method must first be implemented in supabase.
         """
-        tables = self.get_all_tables()
+        tables = self.get_all_tables_from_supabase()
         tables_list = [table["table_name"] for table in tables]
         type_definitions = {}
 
+        # Make an initial class that links the table name to the column type identifiers
+        linked_table_column_types = f"class LinkedTableColumnTypes:\n    linked_table_dict = {{\n"
+
         for table_name in tables_list:
-            column_definitions = self.get_table_data_structure(table_name)
+            column_definitions = self.get_table_data_structure_from_supabase(table_name)
 
             class_name = table_name.replace("_", " ")
             class_name = class_name.title()
@@ -100,9 +106,13 @@ class AbstractSupabaseClient:
 
             type_definition = f"class {class_name}:\n"
             for column_definition in column_definitions:
+
                 column_name = column_definition["column_name"]
                 type_name = column_definition["data_type"]
-                is_optional = column_definition["is_nullable"]
+                is_nullable = column_definition["is_nullable"]
+                is_identity = column_definition["is_identity"]
+                has_default_value = column_definition["has_default_value"]
+
                 if type_name == "integer":
                     type_definition += f"    {column_name}: int\n"
                 elif type_name == "text":
@@ -122,14 +132,23 @@ class AbstractSupabaseClient:
                 else:
                     raise ValueError(f"Unknown type: {type_name}")
 
-                if is_optional == "YES":
+                # Set the type to None if needed
+                if is_nullable or has_default_value or is_identity:
                     type_definition = type_definition[:-1] + f" | None\n"
 
             type_definitions[table_name] = type_definition
+
+            linked_table_column_types += f'        "{table_name}": {class_name},\n'
+
+        # close linked_table_dict
+        linked_table_column_types += "    }\n"
 
         root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         full_file_path = os.path.join(root_path, self.datatypes_file_path_from_root)
 
         with open(full_file_path, "w") as f:
+
             for table_name, type_definition in type_definitions.items():
                 f.write(f"{type_definition}\n\n")
+
+            f.write(f"{linked_table_column_types}")
