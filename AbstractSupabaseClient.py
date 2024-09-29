@@ -1,5 +1,8 @@
 import abc
 import os
+import types
+
+from classes.utilities.Utilities import Utilities
 
 
 class AbstractSupabaseClient:
@@ -9,16 +12,93 @@ class AbstractSupabaseClient:
     def supabase_service_client(self):
         raise NotImplementedError("supabase_service_client property must be implemented.")
 
-    @property
-    @abc.abstractmethod
-    def datatypes_file_path_from_root(self):
-        raise NotImplementedError("type_file_path_from_root property must be implemented.")
-
     @abc.abstractmethod
     def create_supabase_service_client(self):
         raise NotImplementedError("create_supabase_service_client method must be implemented.")
 
-    def get_all_tables(self):
+    @property
+    @abc.abstractmethod
+    def datatypes_file_path_from_root(self):
+        """
+        The path to the file that contains the data types for the supabase database.
+        """
+        raise NotImplementedError("type_file_path_from_root property must be implemented.")
+
+    @property
+    @abc.abstractmethod
+    def linked_table_column_types(self):
+        """
+        The linked_table_column_types retrieved from the supabase data types file.
+
+        Should always be called LinkedTableColumnTypes. The import statements dictates which database applies.
+        """
+        raise NotImplementedError("linked_table_column_types property must be implemented.")
+
+    def insert_row(self, table_name: str, row_data: dict):
+        """
+        Inserts a row into the table. Validates the row data against the table structure.
+        """
+        self._validate_insertion_row_data(table_name, row_data)
+        return self.supabase_service_client.table(table_name).insert(row_data).execute()
+
+    def _validate_insertion_row_data(self, table_name: str, row_data: dict):
+        """
+        Validates the row data against the table structure.
+        """
+        try:
+            table_data_structure = self.linked_table_column_types.linked_table_dict[table_name]
+        except KeyError:
+            raise KeyError(f"Table name '{table_name}' not found.")
+
+        self._validate_column_presence_for_insertion(table_data_structure, row_data)
+        self._validate_types(table_data_structure, row_data)
+
+    @staticmethod
+    def _validate_column_presence_for_insertion(table_data_structure: any, row_data: dict):
+        """
+        Validates that the row data has all the columns required for insertion.
+        """
+        # validate all necessary columns are present
+        column_names = [column_name for column_name in table_data_structure.__annotations__.keys()]
+        optional_columns = [column_name for column_name in column_names if
+                            type(table_data_structure.__annotations__[column_name]) == types.UnionType
+                            and Utilities.has_type(table_data_structure.__annotations__[column_name], type(None))]
+
+        set_of_mandatory_column_names = set(column_names)
+        set_of_optional_columns = set(optional_columns)
+
+        set_of_mandatory_column_names = set_of_mandatory_column_names - set_of_optional_columns
+
+        for column_name in row_data.keys():
+            if column_name in set_of_mandatory_column_names:
+                set_of_mandatory_column_names.remove(column_name)
+                continue
+            if column_name in set_of_optional_columns:
+                continue
+            raise KeyError(f"Column name '{column_name}' not found in table data structure.")
+
+        if len(set_of_mandatory_column_names) > 0:
+            raise KeyError(f"Column names {set_of_mandatory_column_names} are mandatory. "
+                           f"Missing {row_data.keys()} in row data.")
+
+    @staticmethod
+    def _validate_types(table_data_structure: any, row_data: dict):
+        """
+        Validates that the row data has the correct types.
+        """
+        for column_name in row_data.keys():
+            # Check against union types
+            if type(table_data_structure.__annotations__[column_name]) == types.UnionType:
+                union_type = table_data_structure.__annotations__[column_name]
+                if not Utilities.has_type(union_type, type(row_data[column_name])):
+                    raise ValueError(f"Column '{column_name}' is not of type {union_type}.")
+
+            # Check against single types
+            elif not isinstance(row_data[column_name], table_data_structure.__annotations__[column_name]):
+                raise ValueError(
+                    f"Column '{column_name}' is not of type {table_data_structure.__annotations__[column_name]}.")
+
+    def get_all_tables_from_supabase(self):
         """
         Calls the rpc method 'get_all_tables'.
 
@@ -42,7 +122,6 @@ class AbstractSupabaseClient:
           public.get_all_tables ();
         """
         return self.supabase_service_client.rpc("get_all_tables").execute().data
-
 
     def get_table_data_structure_from_supabase(self, table_name: str):
         """
